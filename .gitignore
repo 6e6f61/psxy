@@ -1,0 +1,5 @@
+internal
+zig-out
+zig-cache
+bios
+.vscode

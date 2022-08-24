@@ -1,0 +1,3 @@
+[submodule "accord"]
+	path = accord
+	url = https://github.com/BanchouBoo/accord
