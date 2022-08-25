@@ -19,7 +19,7 @@
 //!
 //! Segment "Kseg0":
 //! - 0x1f000000 to 0x1f00ffff (64KB):  parallel port R/W
-//! - 0x1f800000 to 0x1f8003ff (1024B): the "scratchpad", used as a data cache.
+//! - 0x1f800000 to 0x1f8003ff (1KB):   the "scratchpad", used as a data cache.
 //! - 0x1f801000 to 0x1f802fff (8K):    hardware registers
 //! - 0x80000000 to 0x801fffff (2MB):   cached mirror of Kuseg
 //!
@@ -46,9 +46,12 @@ const bios = @import("bios.zig");
 /// The PlayStation's 2MB of system memory is materialised in hardware as four banks of 512KB DRAM
 /// chips.
 const memory_size: usize = (512 * 1024) * 4;
+const scratch_size: usize = 1024;
 
-const physical_memory_region = Region.init(0x00, memory_size);
+const physical_memory_region = Region.init(0x00000000, memory_size);
 const bios_region            = Region.init(0xbfc00000, (1024 * 512));
+const scratch_region         = Region.init(0x1f800000, scratch_size);
+const hardware_registers_region = Region.init(0x1f801000, 36);
 
 /// Represents a region of logical memory.
 const Region = struct {
@@ -73,17 +76,25 @@ const Region = struct {
 const MemoryError = error {
     /// A bus error occurs when a memory address not mapped to physical space is accessed.
     Bus,
+    /// Occurs when the emulator tries to overwrite the base address of a memory expansion map.
+    /// This is allowed in MIPS but shouldn't ever occur on a PlayStation.
+    ExpansionMapOverwrite,
 };
 
 pub const Memory = struct {
+    /// Because MIPS is a "byte-addressable" architecture, despite it technically having
+    /// 32-bit memory addresses, you're also able to modify a given addresses individual
+    /// bytes. Ergo memory here is `[_]u8`.
     memory: [memory_size]u8,
     bios: [bios.bios_size]u8,
+    scratch: [scratch_size]u8,
 
     /// The memory returned is zeroed.
     pub fn init() Memory {
         return Memory {
             .memory = std.mem.zeroes([memory_size]u8),
             .bios = undefined,
+            .scratch = std.mem.zeroes([scratch_size]u8),
         };
     }
 
@@ -91,8 +102,14 @@ pub const Memory = struct {
         self.bios = b;
     }
 
-    /// Returns the `WordSize` value stored at `address` in little-endian.
-    pub fn load32(self: Memory, address: u32) MemoryError!u32 {
+    /// Returns the 32-bit value stored at `address` in little-endian.
+    pub fn load(self: Memory, address: u32) MemoryError!u32 {
+        // Unaligned memory accesses are memory accesses that read/write N bytes from an address
+        // that is not divisible by N - that is, the data would end up being written across
+        // _part_ of a given byte. Software attempting an unaligned memory access usually
+        // indicates a bug and is explicitly not allowed in MIPS.
+        if (address % 4 != 0) return MemoryError.Bus;
+
         if (physical_memory_region.includes(address)) {
             log.warn("{x} >= {x}, {x} <= {x}", .{ address, physical_memory_region.from,
                 address, physical_memory_region.to });
@@ -103,9 +120,44 @@ pub const Memory = struct {
             // "component".
             const relative = bios_region.relative(address);
             return load32From(&self.bios, relative);
+        } else {
+            return MemoryError.Bus;
         }
+    }
 
-        return MemoryError.Bus;
+    // Puts a 32-bit value into memory address `address`.
+    pub fn store(self: *Memory, address: u32, value: u32) MemoryError!void {
+        if (address % 4 != 0) return MemoryError.Bus;
+
+        if (physical_memory_region.includes(address)) {
+            storeTo(&self.memory, address, value);
+        } else if (scratch_region.includes(address)) {
+            const relative = scratch_region.relative(address);
+            storeTo(&self.scratch, relative, value);
+        } else if (hardware_registers_region.includes(address)) {
+            const relative = hardware_registers_region.relative(address);
+            // These two locations store the base addresses for the PS1's expansion
+            // register maps. In the PlayStation, these are always hardcoded to
+            // 0x1f000000 and 0x1f802000, so this shouldn't ever happen.
+            if (relative == 0 or relative == 4) {
+                return MemoryError.ExpansionMapOverwrite;
+            }
+            // Otherwise, the value of the other hardware registers may change, but we don't
+            // really care about their value because we're not hardware. So just nop these.
+        } else {
+            return MemoryError.Bus;
+        }
+    }
+
+    inline fn storeTo(mem: []u8, address: u32, value: u32) void {
+        log.debug("\nStart:{b}\n1: {b}\n2: {b}\n3: {b}\n4: {b}",
+            .{ value, value >> 26, 0, 0, value << 26});
+        mem[address]     = @intCast(u8, value >> 26);
+        mem[address + 1] = unreachable;
+        mem[address + 2] = unreachable;
+        mem[address + 3] = @intCast(u8, value << 26);
+
+        log.debug("{}", .{ std.fmt.fmtSliceHexLower(mem) });
     }
 };
 

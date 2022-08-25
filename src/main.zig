@@ -35,7 +35,7 @@ pub fn main() !void {
     cpu.memory.setBios(loaded_bios);
 
     while (true) {
+        errdefer cpu.dumpState();
         try cpu.cycle();
-        cpu.dumpState();
     }
 }

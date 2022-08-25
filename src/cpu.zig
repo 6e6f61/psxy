@@ -1,6 +1,7 @@
 //! The PlayStation's CPU is a MIPS Computer Systems R3000, a 32-bit RISC chipset that runs the
 //! MIPS I ISA at 33.8688Mhz.
 const std = @import("std");
+const Log2Int = std.math.Log2Int;
 const log = @import("log.zig");
 const op = @import("op.zig");
 const Memory = @import("mem.zig").Memory;
@@ -86,10 +87,25 @@ pub const Cpu = struct {
     /// Intended for debugging. Prints what it reasonably can about the CPU's current state.
     pub fn dumpState(self: *Cpu) void {
         log.warn("Something called dumpState.", .{});
-        log.info("Registers:\n{x}", .{ self.registers });
-        log.info("Hi: {x}", .{ self.hi });
-        log.info("Lo: {x}", .{ self.lo });
-        log.info("Not dumping memory.", .{});
+        log.debug("Registers:\n{x}", .{ self.registers });
+        log.debug("Hi: {x}", .{ self.hi });
+        log.debug("Lo: {x}", .{ self.lo });
+        log.debug("PC: {x}", .{ self.program_counter });
+
+        log.debug("Modified memory (if any):", .{});
+        for (self.memory.memory) |byte, idx| {
+            if (byte != 0x00) {
+                if (byte % 4 == 0) log.debug("(memory byte boundry)", .{});
+                log.debug("(Kuseg) {x}: {x}", .{ byte, idx });
+            }
+        }
+
+        for (self.memory.scratch) |byte, idx| {
+            if (byte != 0x00) {
+                if (byte % 4 == 0) log.debug("(memory byte boundry)", .{});
+                log.debug("(scratch) {x}: {x}", .{ byte, idx });
+            }
+        }
     }
 
     inline fn register(self: *Cpu, reg: u32) u32 {
@@ -105,13 +121,17 @@ pub const Cpu = struct {
 
     /// Pull the next instruction, execute it, and advance the program counter.
     pub fn cycle(self: *Cpu) !void {
-        const instruction = try self.memory.load32(self.program_counter);
-        self.program_counter += 1;
+        const instruction = try self.memory.load(self.program_counter);
+        // The program counter is incremented in bytes, so after reading a 32bit instruction
+        // we should advance by 4.
+        self.program_counter += 4;
     
         // See below for opcode documentation.
         switch (op.opcodeOf(instruction)) {
+            0x00 => self.opSll(instruction),
             0x0F => self.opLui(instruction),
             0x0D => self.opOri(instruction),
+            0x2B => try self.opSw(instruction),
             else => {
                 log.err("Illegal instruction encountered! '0x{x}' couldn't be handled.",
                     .{ instruction });
@@ -122,12 +142,27 @@ pub const Cpu = struct {
 
     // Instruction implementations
 
+    /// sll: left logical shift
+    /// Performs a bitwise left shift operation on a register and immediate value, storing the
+    /// result.
+    /// There are a few common ways to encode NOPs in MIPS, but most assemblers produce a left
+    /// logical shift of the value zero, shifted zero bits, and stored in the register $zero.
+    /// This produces the assembly output 0x00000000.
+    inline fn opSll(self: *Cpu, instruction: u32) void {
+        // TODO: Would an explicit optimisation of sll $zero, $zero, 0, to nop be faster?
+        const source = self.register(op.rs(instruction));
+        const value = op.immediate(instruction);
+        const destination = op.rt(instruction);
+
+        self.setRegister(destination, source << @intCast(Log2Int(u32), value));
+    }
+
     /// lui: load upper immediate.
     /// Sets the upper 16 bits of a register to a given value.
     /// The lower 16 bits are explicitly set to 0.
     inline fn opLui(self: *Cpu, instruction: u32) void {
-        const value = op.iValue(instruction) << 16;
-        const destination = op.iDestination(instruction);
+        const value = @as(u32, op.immediate(instruction)) << 16;
+        const destination = op.rt(instruction);
         
         self.setRegister(destination, value);
     }
@@ -135,12 +170,23 @@ pub const Cpu = struct {
     /// ori: bitwise or immediate.
     /// Performs a bitwise or operation on a register and an immediate value and stores the result
     /// in a second register.
-    /// TODO: looks like this is being handled wrong!
     inline fn opOri(self: *Cpu, instruction: u32) void {
-        const source = op.source(instruction);
-        const destination = op.secondSource(instruction);
-        const value = op.iValue(instruction);
+        const source = self.register(op.rs(instruction));
+        const value = op.immediate(instruction);
+        const destination = op.rt(instruction);
 
         self.setRegister(destination, source | value);
+    }
+
+    /// sw: store word.
+    /// Copies a register's content to a specified memory address.
+    inline fn opSw(self: *Cpu, instruction: u32) !void {
+        const value = self.register(op.rt(instruction));
+    
+        const immediate = op.signedExtendedImmediate(instruction);
+        const reg = op.rs(instruction);
+        const memory_address = self.register(reg) + immediate;
+
+        try self.memory.store(memory_address, value);
     }
 };

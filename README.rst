@@ -8,7 +8,7 @@ Documentation
 
 Some of psxy's documentation can be read from autodoc:
 
-.. code-block:: bash
+.. code-block::
     $ zig build-exe -fno-emit-bin -femit-docs
     $ xdg-open docs/index.html
 

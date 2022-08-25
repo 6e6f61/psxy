@@ -31,11 +31,7 @@ fn log(
     nosuspend stderr.print("[" ++ colored_level ++ "] " ++ format ++ "\n", args) catch return;
 }
 
-// Printing absolutely everything can be super slow
 pub inline fn debug(comptime format: []const u8, args: anytype) void {
-    if(!@import("builtin").mode == .Debug) {
-        return;
-    }
     const src = @src();
     log(std.log.Level.debug, src, format, args);
 }
