@@ -70,6 +70,18 @@ pub const Cpu = struct {
     /// After division operations, lo stores the quotient.
     lo: u32,
     memory: Memory,
+    /// This field is neccessary because of how MIPS handles branches.
+    /// For the most part, instructions are executed sequentially - one instruction is read, the
+    /// program counter is incremented, the next one is read, and so on. However, in hardware, CPUs
+    /// implement a pipeline structure that takes new instructions from memory to be executed before
+    /// they've finished executing the current one. This causes issues with branches and jumps,
+    /// because the CPU doesn't know what the next instruction will be. Most CPU architectures with
+    /// pipelining would guess using a technique called branch prediction and then empty and re-fill
+    /// the pipeline if it was wrong. MIPS, instead, unconditionally executes the instruction
+    /// following a jump before jumping - this is called the "branch delay slot".
+    /// So we use this field to store the instruction in the branch delay slot in the situation we
+    /// encounter a jump or branch.
+    next_instruction: u32,
 
     pub fn init() Cpu {
         var cpu = Cpu{
@@ -78,6 +90,7 @@ pub const Cpu = struct {
             .registers = .{ 0xfacade } ** 32,
             .hi = 0,
             .lo = 0,
+            .next_instruction = 0,
         };
         cpu.registers[0] = 0;
 
@@ -87,23 +100,23 @@ pub const Cpu = struct {
     /// Intended for debugging. Prints what it reasonably can about the CPU's current state.
     pub fn dumpState(self: *Cpu) void {
         log.warn("Something called dumpState.", .{});
-        log.debug("Registers:\n{x}", .{ self.registers });
-        log.debug("Hi: {x}", .{ self.hi });
-        log.debug("Lo: {x}", .{ self.lo });
-        log.debug("PC: {x}", .{ self.program_counter });
+        log.info("Registers:\n{x}", .{ self.registers });
+        log.info("Hi: {x}", .{ self.hi });
+        log.info("Lo: {x}", .{ self.lo });
+        log.info("PC: {x}", .{ self.program_counter });
 
-        log.debug("Modified memory (if any):", .{});
+        log.info("Modified memory (if any):", .{});
         for (self.memory.memory) |byte, idx| {
             if (byte != 0x00) {
-                if (byte % 4 == 0) log.debug("(memory byte boundry)", .{});
-                log.debug("(Kuseg) {x}: {x}", .{ byte, idx });
+                if (byte % 4 == 0) log.info("(memory byte boundry)", .{});
+                log.info("(Kuseg) {x}: {x}", .{ byte, idx });
             }
         }
 
         for (self.memory.scratch) |byte, idx| {
             if (byte != 0x00) {
-                if (byte % 4 == 0) log.debug("(memory byte boundry)", .{});
-                log.debug("(scratch) {x}: {x}", .{ byte, idx });
+                if (byte % 4 == 0) log.info("(memory byte boundry)", .{});
+                log.info("(scratch) {x}: {x}", .{ byte, idx });
             }
         }
     }
@@ -121,19 +134,31 @@ pub const Cpu = struct {
 
     /// Pull the next instruction, execute it, and advance the program counter.
     pub fn cycle(self: *Cpu) !void {
-        const instruction = try self.memory.load(self.program_counter);
+        const instruction = self.next_instruction;
+        self.next_instruction = try self.memory.load(self.program_counter);
         // The program counter is incremented in bytes, so after reading a 32bit instruction
         // we should advance by 4.
         self.program_counter += 4;
+
+        log.info("Pipeline: {x:0<8}; {x:0<8}", .{ instruction, self.next_instruction });
     
         // See below for opcode documentation.
         switch (op.opcodeOf(instruction)) {
-            0x00 => self.opSll(instruction),
-            0x0F => self.opLui(instruction),
+            // See op.funct's documentation
+            0x00 => switch (op.funct(instruction)) {
+                0x00 => self.opSll(instruction),
+                else => {
+                    log.err("Bad funct for 00 ({x})", .{ op.funct(instruction) });
+                    return CpuError.IllegalInstruction;
+                },
+            },
+            0x02 => self.opJ(instruction),
+            0x09 => self.opAddiu(instruction),
             0x0D => self.opOri(instruction),
+            0x0F => self.opLui(instruction),
             0x2B => try self.opSw(instruction),
             else => {
-                log.err("Illegal instruction encountered! '0x{x}' couldn't be handled.",
+                log.err("Illegal instruction '{x}' couldn't be handled.",
                     .{ instruction });
                 return CpuError.IllegalInstruction;
             }
@@ -142,7 +167,7 @@ pub const Cpu = struct {
 
     // Instruction implementations
 
-    /// sll: left logical shift
+    /// sll: left logical shift; r-format
     /// Performs a bitwise left shift operation on a register and immediate value, storing the
     /// result.
     /// There are a few common ways to encode NOPs in MIPS, but most assemblers produce a left
@@ -151,13 +176,13 @@ pub const Cpu = struct {
     inline fn opSll(self: *Cpu, instruction: u32) void {
         // TODO: Would an explicit optimisation of sll $zero, $zero, 0, to nop be faster?
         const source = self.register(op.rs(instruction));
-        const value = op.immediate(instruction);
         const destination = op.rt(instruction);
+        const value = op.shamt(instruction);
 
         self.setRegister(destination, source << @intCast(Log2Int(u32), value));
     }
 
-    /// lui: load upper immediate.
+    /// lui: load upper immediate; i-format
     /// Sets the upper 16 bits of a register to a given value.
     /// The lower 16 bits are explicitly set to 0.
     inline fn opLui(self: *Cpu, instruction: u32) void {
@@ -167,7 +192,7 @@ pub const Cpu = struct {
         self.setRegister(destination, value);
     }
 
-    /// ori: bitwise or immediate.
+    /// ori: bitwise or immediate; i-format
     /// Performs a bitwise or operation on a register and an immediate value and stores the result
     /// in a second register.
     inline fn opOri(self: *Cpu, instruction: u32) void {
@@ -178,15 +203,46 @@ pub const Cpu = struct {
         self.setRegister(destination, source | value);
     }
 
-    /// sw: store word.
+    /// sw: store word; i-format
     /// Copies a register's content to a specified memory address.
     inline fn opSw(self: *Cpu, instruction: u32) !void {
         const value = self.register(op.rt(instruction));
     
-        const immediate = op.signedExtendedImmediate(instruction);
+        const immediate = op.signExtendedImmediate(instruction);
         const reg = op.rs(instruction);
-        const memory_address = self.register(reg) + immediate;
+        // +% is Zig for "wrapping add".
+        const memory_address = self.register(reg) +% immediate;
 
         try self.memory.store(memory_address, value);
+    }
+
+    /// addiu: add immediate, unsigned; i-format
+    /// Despite the name, this function takes sign-extended numbers, just like addi - add immediate.
+    /// The only difference between addi and addiu is that addiu truncates on overflow, while addi
+    /// generates an exception.
+    inline fn opAddiu(self: *Cpu, instruction: u32) void {
+        const destination = op.rt(instruction);
+
+        const sourceRegister = op.rs(instruction);
+        const immediate = op.signExtendedImmediate(instruction);
+
+        const value = self.register(sourceRegister) +% immediate;
+
+        self.setRegister(destination, value);
+    }
+
+    /// j: jump and link; j-format
+    /// this instruction modifies the lower 26 bits of the program counter to jump to a specified
+    /// point in the binary. Because both the program counter and instruction width are 32 bits,
+    /// the program counter can't be completely overwritten with this instruction (this is done
+    /// with _jr_, which takes a register containing the desired program counter), so the top
+    /// 4 bits of the program counter are left untouched.
+    inline fn opJ(self: *Cpu, instruction: u32) void {
+        const address = op.longImmediate(instruction);
+        const jump = (self.program_counter & 0xf0000000) | (address << 2);
+
+        log.debug("Jump to {x}", .{ jump });
+
+        self.program_counter = jump;
     }
 };

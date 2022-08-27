@@ -51,7 +51,7 @@ const scratch_size: usize = 1024;
 const physical_memory_region = Region.init(0x00000000, memory_size);
 const bios_region            = Region.init(0xbfc00000, (1024 * 512));
 const scratch_region         = Region.init(0x1f800000, scratch_size);
-const hardware_registers_region = Region.init(0x1f801000, 36);
+const hardware_registers_region = Region.init(0x1f801000, (1024 * 8));
 
 /// Represents a region of logical memory.
 const Region = struct {
@@ -111,8 +111,6 @@ pub const Memory = struct {
         if (address % 4 != 0) return MemoryError.Bus;
 
         if (physical_memory_region.includes(address)) {
-            log.warn("{x} >= {x}, {x} <= {x}", .{ address, physical_memory_region.from,
-                address, physical_memory_region.to });
             // If attempting to access actual working memory, we can just read from memory.
             return load32From(&self.memory, address);
         } else if (bios_region.includes(address)) {
@@ -127,7 +125,7 @@ pub const Memory = struct {
 
     // Puts a 32-bit value into memory address `address`.
     pub fn store(self: *Memory, address: u32, value: u32) MemoryError!void {
-        if (address % 4 != 0) return MemoryError.Bus;
+        //if (address % 4 != 0) return MemoryError.Bus;
 
         if (physical_memory_region.includes(address)) {
             storeTo(&self.memory, address, value);
@@ -145,19 +143,16 @@ pub const Memory = struct {
             // Otherwise, the value of the other hardware registers may change, but we don't
             // really care about their value because we're not hardware. So just nop these.
         } else {
+            log.err("Bad attempted store of {x} in {x}", .{ value, address });
             return MemoryError.Bus;
         }
     }
 
     inline fn storeTo(mem: []u8, address: u32, value: u32) void {
-        log.debug("\nStart:{b}\n1: {b}\n2: {b}\n3: {b}\n4: {b}",
-            .{ value, value >> 26, 0, 0, value << 26});
-        mem[address]     = @intCast(u8, value >> 26);
-        mem[address + 1] = unreachable;
-        mem[address + 2] = unreachable;
-        mem[address + 3] = @intCast(u8, value << 26);
-
-        log.debug("{}", .{ std.fmt.fmtSliceHexLower(mem) });
+        mem[address]     = @intCast(u8, value >> 24);
+        mem[address + 1] = @intCast(u8, (value >> 16) & 0x00FF);
+        mem[address + 2] = @intCast(u8, (value >> 8) & 0x0000FF);
+        mem[address + 3] = @intCast(u8, value & 0x000000FF);
     }
 };
 

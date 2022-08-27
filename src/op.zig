@@ -1,13 +1,27 @@
 //! TODO: General prelude
+//! |=========================================================================================|
+//! | Instruction Format | opcode | rs | rt | rd | shamt | funct | immediate | long immediate |
+//! |--------------------|--------|----|----|----|-------|-------|-----------|----------------|
+//! |       R-format     |   x    | x  | x  | x  |   x   |   x   |           |                |
+//! |--------------------|--------|----|----|----|-------|-------|-----------|----------------|
+//! |       I-format     |   x    | x  | x  |    |       |       |     x     |                |
+//! |--------------------|--------|----|----|----|-------|-------|-----------|----------------|
+//! |       J-format     |   x    |    |    |    |       |       |           |        x       |
+//! |=========================================================================================|
+//! 
+//! 
+//! 
+//! 
 const testing = @import("testing.zig");
+const log = @import("log.zig");
+const std = @import("std");
 
 /// The opcode of a MIPS instruction is always the first six bits.
 pub inline fn opcodeOf(instruction: u32) u32 {
     return instruction >> 26;
 }
 
-/// In R-format and I-format instructions, the first 5 bits after the opcode are called _rs_, for
-/// register source - instructions that take a source register to read from take it here.
+/// In R-format and I-format instructions, the first 5 bits after the opcode are called _rs_.
 pub inline fn rs(instruction: u32) u32 {
     return (instruction >> 21) & 0x1f;
 }
@@ -48,12 +62,13 @@ pub inline fn immediate(instruction: u32) u16 {
 /// Returns the sign-extended equivalent of immediate.
 /// Sign extension refers to the process of increasing the number of bits of an integer while
 /// preserving its sign (i.e., extending a negative u16 to a negative u32).
-/// Normally converting the number 0b1001 (negative 1) by 4 bits would result in 0b00001001
-/// (positive 9). We instead want to convert it to 0b10000001 (also negative 1).
-/// To do this, we'll bit cast (re-interpret) the number as a signed 16 bit number, then back to a
-/// 32 bit unsigned number.
-pub inline fn signedExtendedImmediate(instruction: u32) u32 {
-    return @bitCast(u32, @as(i32, immediate(instruction)));
+/// In the case of MIPS, which stores numbers using two's complement, sign extension is achieved
+/// by simply repeating the sign (the most significant bit of the value) over the new area.
+/// I.e., 0001 becomes 0000_0001, and 1000 becomes 1111_1000.
+/// Of course, this function is also only used by I-format instructions.
+/// TODO: Elaborate
+pub inline fn signExtendedImmediate(instruction: u32) u32 {
+    return @bitCast(u32, @intCast(i32, @bitCast(i16, immediate(instruction))));
 }
 
 /// In J-format instructions, the remaining 26 bits after the opcode are for the target address.
@@ -87,8 +102,14 @@ test "Properly decodes I-format instruction" {
     try testing.expectEqual(u32, 0b00000,            rt(x));
     try testing.expectEqual(u32, 0b1100111010111101, immediate(x));
 }
+
 test "Properly extends signs" {
-    //         opcode  rs    rt    immediate
-    const x =  0b00010_10101_00000_1100111010111101;
-    try testing.expectEqual(u32, 0b1100111010111101, signedExtendedImmediate(x));
+    //               opcode  rs    rt    immediate        
+    const positive = 0b00000_00000_00000_0000000000000001;
+    try testing.expectEqual(u32, 0b00000000000000000000000000000001,
+        signExtendedImmediate(positive));
+
+    const negative = 0b00000_00000_00000_1111111111111110;
+    try testing.expectEqual(u32, 0b11111111111111111111111111111110,
+        signExtendedImmediate(negative));
 }

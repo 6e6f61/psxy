@@ -5,7 +5,7 @@ TODO
 - Fix log.zig fn name
 - Elaborate on what endianness is in mem.zig load32from
 - Document how to buld (there's submodules)
-- Remove references to wordsize
+- todo: document what every instruction's format is
 - the readme code block is broken?
 
 Very far future
